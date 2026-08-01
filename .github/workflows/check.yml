@@ -1,0 +1,114 @@
+name: Check Cinema City VIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Date to check: YYYY-MM-DD, a weekday name, today, or tomorrow"
+        required: false
+        default: "thursday"
+      movie_query:
+        description: "Comma-separated movie title aliases"
+        required: false
+        default: "Spider-Man,Spiderman,ספיידרמן"
+  schedule:
+    # Hourly during waking hours only. Cron is always UTC; Israel is UTC+3 in
+    # summer, so 05-18 UTC == 08:23 .. 21:23 local, and nothing fires between
+    # 22:00 and 08:00. The minute is offset from :00 because GitHub delays or
+    # drops scheduled runs at the top of the hour.
+    - cron: "23 5-18 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: cinema-city-vip-monitor
+  # Never cancel a scheduled check: a manual run that lands on top of one
+  # would otherwise kill it, and a killed run notifies about nothing.
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TARGET_DATE: ${{ inputs.target_date || 'thursday' }}
+      MOVIE_QUERY: ${{ inputs.movie_query || 'Spider-Man,Spiderman,ספיידרמן' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: python check_vip.py
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cinema-city-check-${{ github.run_number }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Notify when tickets appear
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(jq -r .status artifacts/result.json)
+          resolved_date=$(jq -r .target_date artifacts/result.json)
+          title="🎬 נפתחו כרטיסי VIP בסינמה סיטי גלילות — ${resolved_date}"
+
+          if [[ "$status" != "available" ]]; then
+            echo "Status is '$status' for ${resolved_date} — nothing to announce."
+            exit 0
+          fi
+
+          # The issue doubles as the "already told you" marker, so Telegram
+          # fires exactly once per date instead of every hour after opening.
+          # Match locally on the ISO date rather than via `--search`: GitHub's
+          # search tokenizer is unreliable for Hebrew titles, and a missed
+          # match here would mean a duplicate issue and an hourly Telegram.
+          existing=$(gh issue list --state all --limit 200 --json title \
+            --jq "[.[] | select(.title | contains(\"${resolved_date}\"))] | length")
+          if [[ "$existing" != "0" ]]; then
+            echo "Already announced ${resolved_date}."
+            exit 0
+          fi
+
+          gh issue create --title "$title" --body-file artifacts/result.md
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            echo "Telegram secrets not set — GitHub issue only."
+            exit 0
+          fi
+          curl -sS --fail-with-body -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@artifacts/notify.txt" > /dev/null
+          echo "Telegram message sent."
+
+      - name: Tell me if the monitor itself broke
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            exit 0
+          fi
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          text=$'⚠️ הניטור של כרטיסי ה-VIP נכשל — הבדיקה אינה פועלת כרגע.\n'"$run_url"
+          curl -sS --fail-with-body -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${text}" > /dev/null

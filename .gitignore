@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Machine-local Claude Code settings.
+.claude/settings.local.json
+
+# Generated on every run and uploaded as a workflow artifact.
+artifacts/
