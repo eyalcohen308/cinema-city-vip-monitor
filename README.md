@@ -48,8 +48,8 @@ box office has opened while you wait.
 
 ## GitHub Actions
 
-`.github/workflows/check.yml` runs hourly at `:23`, **only between 08:00 and 22:00
-Israel time** (`cron: "23 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3
+`.github/workflows/check.yml` runs hourly on the hour, **only between 08:00 and 22:00
+Israel time** (`cron: "0 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3
 in summer). Nothing fires overnight. Choose **Actions → Check Cinema City VIP → Run
 workflow** to pass a one-off date or movie at any hour.
 
@@ -64,7 +64,7 @@ target date rather than every hour after it opens.
 Two further messages exist so that silence is never ambiguous:
 
 - **On failure** — if a run errors, Telegram says the monitor has stopped watching.
-- **Daily heartbeat** — once a day at ~09:23 Israel time, a short "✅ הניטור פעיל"
+- **Daily heartbeat** — once a day at ~09:00 Israel time, a short "✅ הניטור פעיל"
   message with the current status. It is skipped on the day tickets open, since the real
   alert already went out.
 

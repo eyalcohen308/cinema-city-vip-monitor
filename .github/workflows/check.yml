@@ -17,11 +17,10 @@ on:
         required: false
         default: false
   schedule:
-    # Hourly during waking hours only. Cron is always UTC; Israel is UTC+3 in
-    # summer, so 05-18 UTC == 08:23 .. 21:23 local, and nothing fires between
-    # 22:00 and 08:00. The minute is offset from :00 because GitHub delays or
-    # drops scheduled runs at the top of the hour.
-    - cron: "23 5-18 * * *"
+    # Hourly on the hour during waking hours only. Cron is always UTC; Israel
+    # is UTC+3 in summer, so 05-18 UTC == 08:00 .. 21:00 local, and nothing
+    # fires between 22:00 and 08:00.
+    - cron: "0 5-18 * * *"
 
 permissions:
   contents: read
@@ -111,7 +110,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # 06:00 UTC == 09:23 Israel time once the :23 cron offset is applied.
+          # 06:00 UTC == 09:00 Israel time.
           if [[ "$FORCE" != "true" && "$(date -u +%H)" != "06" ]]; then
             exit 0
           fi
