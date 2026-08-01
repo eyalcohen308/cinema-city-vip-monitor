@@ -96,17 +96,20 @@ Two details worth knowing:
 In a group, the bot needs the **pin messages** admin right for the first run; in a direct
 chat with the bot there is nothing to grant.
 
-Two further messages exist so that silence is never ambiguous:
+One further message exists so that silence is never ambiguous: **on failure**, if a run
+errors, Telegram says the monitor has stopped watching.
 
-- **On failure** — if a run errors, Telegram says the monitor has stopped watching.
-- **Daily heartbeat** — once a day at ~09:00 Israel time, a short "✅ הניטור פעיל"
-  message with the current status. It is skipped on the day tickets open, since the real
-  alert already went out.
+That leaves exactly two things that ever arrive in the chat — the ticket alert and the
+failure alert — and both are worth a notification. Everything else is the silent pinned
+edit.
 
-The heartbeat exists because GitHub silently skips scheduled runs. Without it, "no
-messages" could mean either "not on sale yet" or "the monitor died three days ago". With
-it, a missing morning message is itself the alarm. Run the workflow manually with
-**force_heartbeat = true** to test it on demand.
+There used to be a daily "✅ הניטור פעיל" heartbeat as well; the pinned panel replaced it.
+Be aware of what that trades away. GitHub silently skips scheduled runs, and disables
+them entirely after 60 days of repository inactivity — neither of which raises a failure,
+because a run that never starts cannot fail. The heartbeat caught that by being *absent*;
+the panel catches it only by going stale, which is passive and requires you to look.
+`נבדק לאחרונה` more than an hour or two old during the day means the schedule has stopped,
+not that there is no news.
 
 All human-facing output — the Telegram message, the issue title and body, and
 `result.md` — is in Hebrew. `result.json` stays English so the workflow can branch on
