@@ -11,6 +11,11 @@ on:
         description: "Comma-separated movie title aliases"
         required: false
         default: "Spider-Man,Spiderman,ספיידרמן"
+      force_heartbeat:
+        description: "Send the daily 'still alive' Telegram now (for testing)"
+        type: boolean
+        required: false
+        default: false
   schedule:
     # Hourly during waking hours only. Cron is always UTC; Israel is UTC+3 in
     # summer, so 05-18 UTC == 08:23 .. 21:23 local, and nothing fires between
@@ -96,6 +101,36 @@ jobs:
             --data "parse_mode=HTML" \
             --data "disable_web_page_preview=true" > /dev/null
           echo "Telegram message sent."
+
+      - name: Daily heartbeat so silence never means "probably fine"
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE: ${{ inputs.force_heartbeat }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 06:00 UTC == 09:23 Israel time once the :23 cron offset is applied.
+          if [[ "$FORCE" != "true" && "$(date -u +%H)" != "06" ]]; then
+            exit 0
+          fi
+          # When tickets are actually open the real alert already went out.
+          if [[ "$(jq -r .status artifacts/result.json)" == "available" ]]; then
+            exit 0
+          fi
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            exit 0
+          fi
+
+          { printf '✅ <b>הניטור פעיל</b>\n\n'; cat artifacts/notify.txt; } > heartbeat.txt
+          curl -sS --fail-with-body -X POST \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@heartbeat.txt" \
+            --data "parse_mode=HTML" \
+            --data "disable_web_page_preview=true" > /dev/null
+          echo "Heartbeat sent."
 
       - name: Tell me if the monitor itself broke
         if: failure()
