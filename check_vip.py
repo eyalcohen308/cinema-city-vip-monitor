@@ -6,6 +6,7 @@ browser is needed and there is no HTML/knockout markup to keep up with.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -361,26 +362,34 @@ def _render_markdown(result: CheckResult, target: date) -> str:
 
 
 def _render_notification(result: CheckResult, target: date) -> str:
-    """Render the short Hebrew plain-text body posted to Telegram."""
+    """Render the Hebrew Telegram body, using Telegram's HTML parse mode.
+
+    Times link straight to the booking page, so the long order URLs never
+    appear as text -- which also avoids bidi mangling in a Hebrew message.
+    """
+    escape = html.escape
     status_he = HEBREW_STATUS.get(result.status, result.status)
+
     if result.status != "available":
         return (
-            f"{result.theater} — אולמות {result.venue_type}\n"
-            f"{_hebrew_date(target)}\n"
-            f"סטטוס: {status_he}"
+            f"<b>{escape(result.theater)}</b> — אולמות {escape(result.venue_type)}\n"
+            f"{escape(_hebrew_date(target))}\n"
+            f"סטטוס: {escape(status_he)}"
         )
 
     lines = [
-        f"🎬 נפתחו כרטיסי {result.venue_type}!",
+        f"🎬 <b>נפתחו כרטיסי {escape(result.venue_type)}!</b>",
         "",
-        result.theater,
-        _hebrew_date(target),
+        escape(result.theater),
+        escape(_hebrew_date(target)),
         "",
     ]
     for screening in result.screenings:
-        # URL on its own line so bidi reordering cannot mangle it.
-        lines.append(f"🎟 {screening.time} — {screening.movie}")
-        lines.append(screening.booking_url)
+        lines.append(
+            f'🎟 <b>{escape(screening.time)}</b> — '
+            f'<a href="{escape(screening.booking_url)}">'
+            f"{escape(screening.movie)} — להזמנה</a>"
+        )
     return "\n".join(lines)
 
 
