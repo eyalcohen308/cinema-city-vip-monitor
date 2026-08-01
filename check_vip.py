@@ -372,24 +372,31 @@ def _render_notification(result: CheckResult, target: date) -> str:
 
     if result.status != "available":
         return (
-            f"<b>{escape(result.theater)}</b> — אולמות {escape(result.venue_type)}\n"
+            f"<b>{escape(result.theater)}</b> · אולמות {escape(result.venue_type)}\n"
             f"{escape(_hebrew_date(target))}\n"
-            f"סטטוס: {escape(status_he)}"
+            f"{escape(status_he)}"
         )
 
-    lines = [
-        f"🎬 <b>נפתחו כרטיסי {escape(result.venue_type)}!</b>",
-        "",
-        escape(result.theater),
-        escape(_hebrew_date(target)),
-        "",
-    ]
+    # Group by movie so the title is stated once instead of on every row.
+    by_movie: dict[str, list[Screening]] = {}
     for screening in result.screenings:
-        lines.append(
-            f'🎟 <b>{escape(screening.time)}</b> — '
-            f'<a href="{escape(screening.booking_url)}">'
-            f"{escape(screening.movie)} — להזמנה</a>"
-        )
+        by_movie.setdefault(screening.movie, []).append(screening)
+
+    lines = [
+        f"🎬 <b>נפתחו כרטיסי {escape(result.venue_type)}</b>",
+        f"{escape(result.theater)} · {escape(_hebrew_date(target))}",
+    ]
+    for movie, showings in by_movie.items():
+        lines.append("")
+        lines.append(f"<b>{escape(movie)}</b>")
+        for screening in showings:
+            lines.append(
+                f'🎟 <a href="{escape(screening.booking_url)}">'
+                f"{escape(screening.time)}</a>"
+            )
+
+    lines.append("")
+    lines.append("<i>לחצו על השעה להזמנת כרטיסים</i>")
     return "\n".join(lines)
 
 
