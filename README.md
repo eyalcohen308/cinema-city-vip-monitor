@@ -59,9 +59,19 @@ When the target date goes on sale you get:
 - a **GitHub issue** containing `result.md`.
 
 The issue doubles as the "already announced" marker, so Telegram fires exactly once per
-target date rather than every hour after it opens. If the run itself fails, a separate
-Telegram message tells you the monitor has stopped watching — otherwise a broken monitor
-is indistinguishable from "not on sale yet".
+target date rather than every hour after it opens.
+
+Two further messages exist so that silence is never ambiguous:
+
+- **On failure** — if a run errors, Telegram says the monitor has stopped watching.
+- **Daily heartbeat** — once a day at ~09:23 Israel time, a short "✅ הניטור פעיל"
+  message with the current status. It is skipped on the day tickets open, since the real
+  alert already went out.
+
+The heartbeat exists because GitHub silently skips scheduled runs. Without it, "no
+messages" could mean either "not on sale yet" or "the monitor died three days ago". With
+it, a missing morning message is itself the alarm. Run the workflow manually with
+**force_heartbeat = true** to test it on demand.
 
 All human-facing output — the Telegram message, the issue title and body, and
 `result.md` — is in Hebrew. `result.json` stays English so the workflow can branch on
