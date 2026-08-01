@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -30,6 +30,11 @@ THEATER_NAME = os.getenv("THEATER_NAME", "סינמה סיטי גלילות")
 SCHEDULE_URL = f"{SITE}/Timehour?id={THEATER_ID}&theathereid={TIX_THEATER_ID}&vid=2"
 OUTPUT_DIR = Path("artifacts")
 TZ = ZoneInfo("Asia/Jerusalem")
+
+# Mirrors the `cron: "0 5-18 * * *"` in .github/workflows/check.yml. Kept in
+# UTC exactly as the cron is, so "next check" stays right across DST -- the
+# local window is 08:00-21:00 in summer and 07:00-20:00 in winter.
+SCHEDULE_HOURS_UTC = range(5, 19)
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -67,6 +72,15 @@ HEBREW_STATUS = {
     "venue_type_not_offered": "בית הקולנוע אינו מציע אולם VIP",
 }
 
+# Traffic lights for the pinned status panel: green only when you can book.
+STATUS_EMOJI = {
+    "available": "🟢",
+    "target_date_not_on_sale": "🟡",
+    "date_on_sale_but_no_screenings": "🟡",
+    "movie_not_in_vip_lineup": "🔴",
+    "venue_type_not_offered": "🔴",
+}
+
 
 @dataclass(frozen=True)
 class Screening:
@@ -93,6 +107,8 @@ class CheckResult:
     date_detected: bool
     screenings: list[Screening] = field(default_factory=list)
     vip_dates_on_sale: list[str] = field(default_factory=list)
+    movie_query: list[str] = field(default_factory=list)
+    matched_movies: list[str] = field(default_factory=list)
     status: str = "unknown"
     notes: list[str] = field(default_factory=list)
 
@@ -258,6 +274,7 @@ def check(target: date, movie_queries: list[str]) -> CheckResult:
         vip_offered=False,
         movie_in_vip_lineup=False,
         date_detected=False,
+        movie_query=movie_queries,
     )
 
     venue_type_id = _venue_type_id(VENUE_TYPE_NAME)
@@ -282,6 +299,7 @@ def check(target: date, movie_queries: list[str]) -> CheckResult:
         )
         return result
     result.movie_in_vip_lineup = True
+    result.matched_movies = [movie.get("Name", "?") for movie in matched]
 
     stamp = target.strftime("%d/%m/%Y")
     for movie in matched:
@@ -306,7 +324,7 @@ def check(target: date, movie_queries: list[str]) -> CheckResult:
         )
     else:
         result.status = "target_date_not_on_sale"
-        titles = ", ".join(movie.get("Name", "?") for movie in matched)
+        titles = ", ".join(result.matched_movies)
         result.notes.append(
             f"הסרט {titles} מוקרן באולמות ה-{VENUE_TYPE_NAME} של {THEATER_NAME}, "
             f"אך {_hebrew_date(target)} עדיין לא נפתח למכירה."
@@ -322,6 +340,59 @@ def check(target: date, movie_queries: list[str]) -> CheckResult:
 def _hebrew_date(value: date) -> str:
     """Render a date the way Israeli sites do: 'יום חמישי 06/08/2026'."""
     return f"{HEBREW_WEEKDAYS[value.weekday()]} {value.strftime('%d/%m/%Y')}"
+
+
+def _next_check(after: datetime) -> datetime:
+    """The next hour the workflow's cron will actually fire, in local time."""
+    probe = after.astimezone(timezone.utc).replace(
+        minute=0, second=0, microsecond=0
+    ) + timedelta(hours=1)
+    while probe.hour not in SCHEDULE_HOURS_UTC:
+        probe += timedelta(hours=1)
+    return probe.astimezone(TZ)
+
+
+def _render_status(result: CheckResult, target: date) -> str:
+    """Render the pinned Telegram status panel, in Telegram's HTML mode.
+
+    This one message is edited in place after every run, so it has to read
+    standalone: what is being watched, what the answer is right now, and when
+    the question was last asked. Times are absolute -- a relative "12 minutes
+    ago" would freeze into the message and start lying immediately.
+    """
+    escape = html.escape
+    checked = datetime.fromisoformat(result.checked_at)
+    watching = result.matched_movies or result.movie_query
+
+    lines = [
+        f"📡 <b>ניטור {escape(result.venue_type)}</b> · {escape(result.theater)}",
+        f"🎬 {escape(', '.join(watching)) if watching else '—'}",
+        f"📅 יעד: {escape(_hebrew_date(target))}",
+        "",
+        f"{STATUS_EMOJI.get(result.status, '⚪️')} <b>"
+        f"{escape(HEBREW_STATUS.get(result.status, result.status))}</b>",
+    ]
+
+    for screening in result.screenings:
+        lines.append(
+            f'🎟 <a href="{escape(screening.booking_url)}">'
+            f"{escape(screening.time)}</a>"
+        )
+
+    lines.extend(
+        [
+            "",
+            f"🕐 נבדק לאחרונה: {escape(checked.strftime('%d/%m %H:%M'))}",
+            f"⏭ הבדיקה הבאה: "
+            f"{escape(_next_check(checked).strftime('%d/%m %H:%M'))}",
+        ]
+    )
+    if result.vip_dates_on_sale:
+        lines.append(
+            "📆 תאריכים שנפתחו: " + escape(", ".join(result.vip_dates_on_sale))
+        )
+
+    return "\n".join(lines)
 
 
 def _render_markdown(result: CheckResult, target: date) -> str:
@@ -423,6 +494,9 @@ def main() -> int:
     )
     (OUTPUT_DIR / "notify.txt").write_text(
         _render_notification(result, target), encoding="utf-8"
+    )
+    (OUTPUT_DIR / "status.txt").write_text(
+        _render_status(result, target), encoding="utf-8"
     )
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

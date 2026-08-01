@@ -101,6 +101,55 @@ jobs:
             --data "disable_web_page_preview=true" > /dev/null
           echo "Telegram message sent."
 
+      - name: Refresh the pinned status message
+        if: success()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+            exit 0
+          fi
+          api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}"
+          # A bot's id is the part of its token before the colon, so knowing
+          # "is the pinned message mine?" costs no extra API call.
+          bot_id="${TELEGRAM_BOT_TOKEN%%:*}"
+
+          # The pinned message *is* the state store. Nothing to persist between
+          # runs, and if it ever gets unpinned or deleted the next run simply
+          # posts and pins a fresh one.
+          pinned=$(curl -sS "${api}/getChat" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            | jq -r --arg bot "$bot_id" \
+              '(.result.pinned_message // empty)
+                 | select(.from.id == ($bot | tonumber)) | .message_id')
+
+          if [[ -n "$pinned" ]] && curl -sS "${api}/editMessageText" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data "message_id=${pinned}" \
+              --data-urlencode "text@artifacts/status.txt" \
+              --data "parse_mode=HTML" \
+              --data "disable_web_page_preview=true" \
+              | jq -e '.ok' > /dev/null; then
+            echo "Pinned status message ${pinned} updated."
+            exit 0
+          fi
+
+          message_id=$(curl -sS --fail-with-body "${api}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@artifacts/status.txt" \
+            --data "parse_mode=HTML" \
+            --data "disable_web_page_preview=true" \
+            | jq -r '.result.message_id')
+          # Silent: the status panel is for looking up, never for interrupting.
+          curl -sS --fail-with-body "${api}/pinChatMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data "message_id=${message_id}" \
+            --data "disable_notification=true" > /dev/null
+          echo "Posted and pinned a new status message ${message_id}."
+
       - name: Daily heartbeat so silence never means "probably fine"
         if: success()
         env:
