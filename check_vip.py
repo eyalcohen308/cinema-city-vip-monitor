@@ -31,10 +31,13 @@ SCHEDULE_URL = f"{SITE}/Timehour?id={THEATER_ID}&theathereid={TIX_THEATER_ID}&vi
 OUTPUT_DIR = Path("artifacts")
 TZ = ZoneInfo("Asia/Jerusalem")
 
-# Mirrors the `cron: "0 5-18 * * *"` in .github/workflows/check.yml. Kept in
-# UTC exactly as the cron is, so "next check" stays right across DST -- the
-# local window is 08:00-21:00 in summer and 07:00-20:00 in winter.
+# Mirrors the `cron: "7,37 5-18 * * *"` in .github/workflows/check.yml. Kept
+# in UTC exactly as the cron is, so "next check" stays right across DST -- the
+# local window is 08:00-21:00 in summer and 07:00-20:00 in winter. The odd
+# minutes are deliberate: GitHub queues every repository's :00 cron at once,
+# so asking off-peak measurably improves the chance of actually running.
 SCHEDULE_HOURS_UTC = range(5, 19)
+SCHEDULE_MINUTES_UTC = (7, 37)
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -343,13 +346,22 @@ def _hebrew_date(value: date) -> str:
 
 
 def _next_check(after: datetime) -> datetime:
-    """The next hour the workflow's cron will actually fire, in local time."""
-    probe = after.astimezone(timezone.utc).replace(
-        minute=0, second=0, microsecond=0
-    ) + timedelta(hours=1)
-    while probe.hour not in SCHEDULE_HOURS_UTC:
-        probe += timedelta(hours=1)
-    return probe.astimezone(TZ)
+    """The next slot the workflow's cron asks for, in local time.
+
+    Asks for, not gets: GitHub treats scheduled workflows as best-effort and
+    routinely delays or drops them, which is why the panel labels this as
+    planned rather than stating it as fact.
+    """
+    moment = after.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    hour = moment.replace(minute=0)
+    for _ in range(48):  # two days of hours always contains a slot
+        if hour.hour in SCHEDULE_HOURS_UTC:
+            for minute in SCHEDULE_MINUTES_UTC:
+                slot = hour.replace(minute=minute)
+                if slot > moment:
+                    return slot.astimezone(TZ)
+        hour += timedelta(hours=1)
+    raise AssertionError("SCHEDULE_HOURS_UTC is empty")
 
 
 def _render_status(result: CheckResult, target: date) -> str:
@@ -383,7 +395,7 @@ def _render_status(result: CheckResult, target: date) -> str:
         [
             "",
             f"🕐 נבדק לאחרונה: {escape(checked.strftime('%d/%m %H:%M'))}",
-            f"⏭ הבדיקה הבאה: "
+            f"⏭ הבדיקה הבאה (מתוכננת): "
             f"{escape(_next_check(checked).strftime('%d/%m %H:%M'))}",
         ]
     )

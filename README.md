@@ -48,10 +48,18 @@ box office has opened while you wait.
 
 ## GitHub Actions
 
-`.github/workflows/check.yml` runs hourly on the hour, **only between 08:00 and 22:00
-Israel time** (`cron: "0 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3
-in summer). Nothing fires overnight. Choose **Actions → Check Cinema City VIP → Run
+`.github/workflows/check.yml` runs twice an hour, **only between 08:00 and 22:00 Israel
+time** (`cron: "7,37 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3 in
+summer). Nothing fires overnight. Choose **Actions → Check Cinema City VIP → Run
 workflow** to pass a one-off date or movie at any hour.
+
+The `:07` and `:37` are deliberate. **Scheduled workflows are best-effort**, and GitHub
+queues every repository's on-the-hour cron at the same moment, then drops whatever it
+cannot drain — so `0 * * * *` is the single worst slot to ask for. Measured on this repo
+while it was still asking for `:00`, every run that did land was 7 to 80 minutes late and
+several slots never ran at all. Asking off-peak, twice an hour, is what makes a landed
+check per hour likely. It is still not guaranteed, which is why the status panel labels
+the next check **מתוכננת** (planned) rather than stating it as fact.
 
 When the target date goes on sale you get:
 
@@ -74,10 +82,17 @@ without waiting for an alert:
 
 🟡 התאריך עדיין לא נפתח למכירה
 
-🕐 נבדק לאחרונה: 01/08 17:00
-⏭ הבדיקה הבאה: 01/08 18:00
-📆 תאריכים שנפתחו: 01/08/2026, 02/08/2026, 03/08/2026
+🕐 נבדק לאחרונה: 02/08 08:37
+⏭ הבדיקה הבאה (מתוכננת): 02/08 09:07
+📆 תאריכים שנפתחו: 02/08/2026, 03/08/2026, 04/08/2026
+
+          [ 🔄 בדיקה עכשיו ]
 ```
+
+The button opens the workflow's Actions page, where **Run workflow** forces a check
+immediately — useful precisely because the schedule is best-effort. It is a link and not
+a real trigger: dispatching a workflow takes an authenticated API call, and a Telegram
+button can only open a URL or call back to a listener this monitor does not have.
 
 It is edited in place rather than re-sent, so it never notifies and never adds to the
 chat history. There is no `/status` command because a bot command needs a process
