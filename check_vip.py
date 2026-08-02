@@ -31,13 +31,13 @@ SCHEDULE_URL = f"{SITE}/Timehour?id={THEATER_ID}&theathereid={TIX_THEATER_ID}&vi
 OUTPUT_DIR = Path("artifacts")
 TZ = ZoneInfo("Asia/Jerusalem")
 
-# Mirrors the `cron: "7,37 5-18 * * *"` in .github/workflows/check.yml. Kept
+# Mirrors the `cron: "23,53 5-18 * * *"` in .github/workflows/check.yml. Kept
 # in UTC exactly as the cron is, so "next check" stays right across DST -- the
 # local window is 08:00-21:00 in summer and 07:00-20:00 in winter. The odd
 # minutes are deliberate: GitHub queues every repository's :00 cron at once,
 # so asking off-peak measurably improves the chance of actually running.
 SCHEDULE_HOURS_UTC = range(5, 19)
-SCHEDULE_MINUTES_UTC = (7, 37)
+SCHEDULE_MINUTES_UTC = (23, 53)
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "

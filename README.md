@@ -49,17 +49,26 @@ box office has opened while you wait.
 ## GitHub Actions
 
 `.github/workflows/check.yml` runs twice an hour, **only between 08:00 and 22:00 Israel
-time** (`cron: "7,37 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3 in
+time** (`cron: "23,53 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3 in
 summer). Nothing fires overnight. Choose **Actions → Check Cinema City VIP → Run
 workflow** to pass a one-off date or movie at any hour.
 
-The `:07` and `:37` are deliberate. **Scheduled workflows are best-effort**, and GitHub
-queues every repository's on-the-hour cron at the same moment, then drops whatever it
-cannot drain — so `0 * * * *` is the single worst slot to ask for. Measured on this repo
-while it was still asking for `:00`, every run that did land was 7 to 80 minutes late and
-several slots never ran at all. Asking off-peak, twice an hour, is what makes a landed
-check per hour likely. It is still not guaranteed, which is why the status panel labels
-the next check **מתוכננת** (planned) rather than stating it as fact.
+The `:23` and `:53` are deliberate. **Scheduled workflows are best-effort**, and GitHub
+queues every repository's cron for a given minute at the same moment, then drops whatever
+it cannot drain. Those minutes cluster hard on `:00`, then `:30`, then `:15`/`:45` —
+because that is what people type — so `0 * * * *` is the single worst slot to ask for.
+Measured on this repo while it was still asking for `:00`, every run that did land was 7
+to 80 minutes late and several slots never ran at all.
+
+`:23` and `:53` sit in the two widest gaps between those spikes, and `:53` is queued
+*ahead* of the `:00` flood rather than behind it. Twice an hour then makes a landed check
+per hour likely — but never guaranteed, which is why the status panel labels the next
+check **מתוכננת** (planned) rather than stating it as fact.
+
+To force a check immediately, use the **🔄 בדיקה עכשיו** button on the pinned Telegram
+message, or **Actions → Check Cinema City VIP → Run workflow** in a browser or in the
+GitHub Mobile app. Manual dispatches are not subject to the schedule queue and start
+within seconds.
 
 When the target date goes on sale you get:
 

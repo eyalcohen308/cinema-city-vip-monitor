@@ -16,13 +16,14 @@ on:
     # UTC+3 in summer, so 05-18 UTC == 08:00 .. 21:00 local, and nothing fires
     # between 22:00 and 08:00.
     #
-    # :07 and :37 rather than :00 and :30 on purpose. GitHub queues every
-    # repository's on-the-hour cron simultaneously and drops what it cannot
-    # drain, so the top of the hour is the single worst slot to ask for --
-    # observed delays there ran 7 to 80 minutes, with whole slots skipped.
-    # Scheduled runs are best-effort regardless, which is why the status panel
-    # calls the next check "planned" rather than promising it.
-    - cron: "7,37 5-18 * * *"
+    # :23 and :53 on purpose. Cron minutes cluster hard on :00, then :30, then
+    # :15/:45, because that is what people type; GitHub queues each spike at
+    # once and drops what it cannot drain. Asking at :00 cost this repo whole
+    # slots and 7-80 minute delays. :23 and :53 sit in the two widest gaps
+    # between those spikes, and :53 gets queued ahead of the :00 flood rather
+    # than behind it. Scheduled runs are best-effort regardless, which is why
+    # the status panel calls the next check "planned" rather than promising it.
+    - cron: "23,53 5-18 * * *"
 
 permissions:
   contents: read
