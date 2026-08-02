@@ -13,8 +13,10 @@ on:
         default: "Spider-Man,Spiderman,ספיידרמן"
   schedule:
     # Twice an hour during waking hours only. Cron is always UTC; Israel is
-    # UTC+3 in summer, so 05-18 UTC == 08:00 .. 21:00 local, and nothing fires
-    # between 22:00 and 08:00.
+    # UTC+3 in summer, so 03-18 UTC == 06:00 .. 21:00 local, and nothing fires
+    # overnight. In winter (UTC+2) the whole window slides an hour earlier,
+    # to 05:00 .. 20:00 -- cron cannot follow DST, and starting early is the
+    # harmless direction to be wrong in.
     #
     # :23 and :53 on purpose. Cron minutes cluster hard on :00, then :30, then
     # :15/:45, because that is what people type; GitHub queues each spike at
@@ -23,7 +25,7 @@ on:
     # between those spikes, and :53 gets queued ahead of the :00 flood rather
     # than behind it. Scheduled runs are best-effort regardless, which is why
     # the status panel calls the next check "planned" rather than promising it.
-    - cron: "23,53 5-18 * * *"
+    - cron: "23,53 3-18 * * *"
 
 permissions:
   contents: read

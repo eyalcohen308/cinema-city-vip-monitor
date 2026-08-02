@@ -88,8 +88,8 @@ Two details that are easy to get wrong there:
 
 ## GitHub Actions
 
-`.github/workflows/check.yml` runs twice an hour, **only between 08:00 and 22:00 Israel
-time** (`cron: "23,53 5-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3 in
+`.github/workflows/check.yml` runs twice an hour, **only between 06:00 and 22:00 Israel
+time** (`cron: "23,53 3-18 * * *"` — GitHub cron is always UTC, and Israel is UTC+3 in
 summer). Nothing fires overnight. Choose **Actions → Check Cinema City VIP → Run
 workflow** to pass a one-off date or movie at any hour.
 
