@@ -1,10 +1,19 @@
-# Cinema City Glilot VIP monitor
+# VIP cinema monitor
 
-Checks **Cinema City's official site only** for VIP screenings of a given movie at Glilot,
-and opens a GitHub issue the moment the target date goes on sale.
+Watches two cinemas for VIP screenings of a given movie on a target date, and shouts the
+moment either box office opens that date:
 
-It calls the same JSON endpoints (`/tickets/*`) that cinema-city.co.il's own booking UI
-calls, so there is no browser, no scraping, and no dependencies beyond the standard library.
+| Cinema | Chain | Halls |
+| --- | --- | --- |
+| סינמה סיטי גלילות | Cinema City | VIP |
+| פלאנט ראשון לציון | Yes Planet | VIP 21–24 |
+
+Both are checked independently every run. One chain opening a date says nothing about the
+other, so each gets its own alert and its own line in the status panel.
+
+It calls the same JSON endpoints the chains' own booking UIs call — `/tickets/*` on
+cinema-city.co.il, and the `quickbook` data service on planetcinema.co.il — so there is no
+browser, no scraping, and no dependencies beyond the standard library.
 
 ## Run locally
 
@@ -31,20 +40,51 @@ All settings are environment variables.
 | `MOVIE_QUERY` | `Spider-Man,Spiderman,ספיידרמן` | Comma-separated aliases; punctuation and spacing are ignored when matching |
 | `VENUE_TYPE` | `VIP` | Resolved against the theater's live venue-type list |
 | `THEATER_ID` / `TIX_THEATER_ID` | `1` / `1170` | Glilot's site id and ticketing-system id |
-| `THEATER_NAME` | `Cinema City Glilot` | Label used in the report |
+| `THEATER_NAME` | `סינמה סיטי גלילות` | Label used in the report |
+| `PLANET_CINEMA_ID` | `1072` | Yes Planet's cinema id for Rishon LeZion |
+| `PLANET_THEATER_NAME` | `פלאנט ראשון לציון` | Label used in the report |
 
 ## Status values
 
-`artifacts/result.json` and `artifacts/result.md` carry one of:
+`artifacts/result.json` holds a per-cinema result under `cinemas[]`, each carrying one of:
 
-- `available` — bookable VIP showtimes exist on the target date. **This is the only status that opens an issue.**
+- `available` — bookable VIP showtimes exist on the target date. **This is the only status that alerts.**
 - `target_date_not_on_sale` — the movie plays VIP, but that date has not been released yet.
-- `date_on_sale_but_no_screenings` — the date is listed, but no showtimes came back.
+- `date_on_sale_but_no_screenings` — the date is open, but the movie is not showing in VIP.
 - `movie_not_in_vip_lineup` — no VIP movie matched `MOVIE_QUERY`.
-- `venue_type_not_offered` — the theater lists no VIP venue type.
+- `venue_type_not_offered` — the cinema lists no VIP screenings at all.
 
-Every result also includes `vip_dates_on_sale`, so you can see exactly how far ahead the
-box office has opened while you wait.
+plus `check_failed` — that cinema's site did not answer. A chain's outage is contained to
+its own line: Planet being down must not stop Cinema City alerting, so the run still
+succeeds, the healthy chain still announces, and the panel shows ⚠️ against the broken one.
+Only if **every** cinema fails does the run fail and trigger the failure alert.
+
+The top-level `status` is the **best news any cinema carries**, so it reads `available` as
+soon as one of them opens rather than waiting for both.
+
+Every cinema also includes `vip_dates_on_sale`, so you can see exactly how far ahead each
+box office has opened while you wait — that is the number that tells you the target date
+is getting close.
+
+### How each chain is queried
+
+Cinema City resolves the VIP venue-type id, then the movie id, then dates, then showtimes.
+
+Yes Planet needs only two calls, both filtered server-side by `attr=vip`:
+
+```
+/dates/in-cinema/1072/until/<horizon>?attr=vip&lang=he_IL      -> which dates are on sale
+/film-events/in-cinema/1072/at-date/<date>?attr=vip&lang=he_IL -> films[] and events[]
+```
+
+Two details that are easy to get wrong there:
+
+- **`events[]` covers every film that day**, not just yours, so it has to be joined back to
+  `films[]` by `filmId`. Taking it wholesale would announce the wrong movie.
+- **The API's own `bookingLink` field is stale** — it points at `/api/order/<id>`, which
+  404s. The working URL is `https://tickets5.planetcinema.co.il/order/<id>?lang=he`.
+- `vip` is matched as an exact attribute id, never as a substring: `vip-light` is a
+  different, cheaper product at other branches.
 
 ## GitHub Actions
 
@@ -70,13 +110,15 @@ message, or **Actions → Check Cinema City VIP → Run workflow** in a browser 
 GitHub Mobile app. Manual dispatches are not subject to the schedule queue and start
 within seconds.
 
-When the target date goes on sale you get:
+When the target date goes on sale at a cinema you get, **for that cinema**:
 
-- a **Telegram message** with the showtimes and booking links, and
+- a **Telegram message** listing every showtime with its hall and a booking link, and
 - a **GitHub issue** containing `result.md`.
 
-The issue doubles as the "already announced" marker, so Telegram fires exactly once per
-target date rather than every hour after it opens.
+The issue doubles as the "already announced" marker, and the match is on **cinema *and*
+date**, not date alone. That matters: if Glilot opens 06/08 first, an issue exists naming
+that date — a marker keyed only on the date would then silently swallow the Rishon alert
+when Planet opens the same day. Each cinema announces exactly once, independently.
 
 ### The pinned status message
 
@@ -85,18 +127,28 @@ Every successful run also rewrites a single **pinned message** at the top of the
 without waiting for an alert:
 
 ```
-📡 ניטור VIP · סינמה סיטי גלילות
+📡 ניטור VIP
 🎬 ספיידרמן: יום חדש
 📅 יעד: יום חמישי 06/08/2026
 
-🟡 התאריך עדיין לא נפתח למכירה
+🟡 סינמה סיטי גלילות
+התאריך עדיין לא נפתח למכירה
+📆 נפתחו: 02/08, 03/08, 04/08, 05/08
 
-🕐 נבדק לאחרונה: 02/08 08:37
-⏭ הבדיקה הבאה (מתוכננת): 02/08 09:07
-📆 תאריכים שנפתחו: 02/08/2026, 03/08/2026, 04/08/2026
+🟢 פלאנט ראשון לציון
+כרטיסים זמינים להזמנה
+🎟 18:30 · VIP 23
+🎟 21:30 · VIP 23
+
+🕐 נבדק לאחרונה: 02/08 19:23
+⏭ הבדיקה הבאה (מתוכננת): 02/08 19:53
 
           [ 🔄 בדיקה עכשיו ]
 ```
+
+Each cinema gets its own traffic light, so a half-open situation — one chain selling, the
+other not — is visible at a glance rather than collapsed into one status. Showtimes carry
+the hall name, and each time links straight to its booking page.
 
 The button opens the workflow's Actions page, where **Run workflow** forces a check
 immediately — useful precisely because the schedule is best-effort. It is a link and not

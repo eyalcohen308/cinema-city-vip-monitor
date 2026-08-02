@@ -1,7 +1,11 @@
-"""Monitor Cinema City Glilot's official VIP schedule for a target date.
+"""Monitor VIP screenings of a target date across Israeli cinema chains.
 
-Queries the same JSON endpoints the cinema-city.co.il booking UI calls, so no
-browser is needed and there is no HTML/knockout markup to keep up with.
+Two chains are watched: Cinema City (Glilot) and Yes Planet (Rishon LeZion).
+Both expose the same JSON endpoints their own booking UIs call, so there is no
+browser, no HTML to parse, and no dependency beyond the standard library.
+
+Each chain is checked independently and reported side by side: one opening its
+box office says nothing about the other, and the alert has to fire per cinema.
 """
 
 from __future__ import annotations
@@ -20,16 +24,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-SITE = "https://www.cinema-city.co.il"
-# Glilot: `id` is the site theater id, `theathereid` is the ticketing system id.
-THEATER_ID = int(os.getenv("THEATER_ID", "1"))
-TIX_THEATER_ID = int(os.getenv("TIX_THEATER_ID", "1170"))
-VENUE_TYPE_NAME = os.getenv("VENUE_TYPE", "VIP")
-THEATER_NAME = os.getenv("THEATER_NAME", "סינמה סיטי גלילות")
-
-SCHEDULE_URL = f"{SITE}/Timehour?id={THEATER_ID}&theathereid={TIX_THEATER_ID}&vid=2"
 OUTPUT_DIR = Path("artifacts")
 TZ = ZoneInfo("Asia/Jerusalem")
+
+# How far ahead to ask a box office "what is on sale?". Comfortably past any
+# real release window, and both APIs want an explicit horizon.
+HORIZON_DAYS = 60
 
 # Mirrors the `cron: "23,53 5-18 * * *"` in .github/workflows/check.yml. Kept
 # in UTC exactly as the cron is, so "next check" stays right across DST -- the
@@ -43,6 +43,8 @@ USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+
+VENUE_TYPE_NAME = os.getenv("VENUE_TYPE", "VIP")
 
 WEEKDAYS = {
     "monday": 0,
@@ -70,10 +72,22 @@ HEBREW_WEEKDAYS = [
 HEBREW_STATUS = {
     "available": "כרטיסים זמינים להזמנה",
     "target_date_not_on_sale": "התאריך עדיין לא נפתח למכירה",
-    "date_on_sale_but_no_screenings": "התאריך פתוח אך לא נמצאו הקרנות",
+    "date_on_sale_but_no_screenings": "התאריך פתוח אך אין הקרנות של הסרט",
     "movie_not_in_vip_lineup": "הסרט אינו מוצג כרגע באולמות ה-VIP",
     "venue_type_not_offered": "בית הקולנוע אינו מציע אולם VIP",
+    "check_failed": "לא ניתן היה לבדוק — האתר לא הגיב",
 }
+
+# Best news first. The overall status is whichever cinema is furthest up this
+# list, so one chain opening is never masked by the other still being shut.
+STATUS_PRIORITY = (
+    "available",
+    "date_on_sale_but_no_screenings",
+    "target_date_not_on_sale",
+    "movie_not_in_vip_lineup",
+    "venue_type_not_offered",
+    "check_failed",
+)
 
 # Traffic lights for the pinned status panel: green only when you can book.
 STATUS_EMOJI = {
@@ -82,6 +96,7 @@ STATUS_EMOJI = {
     "date_on_sale_but_no_screenings": "🟡",
     "movie_not_in_vip_lineup": "🔴",
     "venue_type_not_offered": "🔴",
+    "check_failed": "⚠️",
 }
 
 
@@ -93,32 +108,41 @@ class Screening:
     date: str
     time: str
     booking_url: str
+    hall: str = ""
 
 
 @dataclass
-class CheckResult:
-    """Serializable result of one availability check."""
+class CinemaResult:
+    """Result of checking one cinema for one target date."""
 
-    checked_at: str
-    target_date: str
-    target_weekday: str
-    source_url: str
+    slug: str
     theater: str
     venue_type: str
-    vip_offered: bool
-    movie_in_vip_lineup: bool
-    date_detected: bool
+    source_url: str
+    vip_offered: bool = False
+    movie_in_vip_lineup: bool = False
+    date_detected: bool = False
     screenings: list[Screening] = field(default_factory=list)
     vip_dates_on_sale: list[str] = field(default_factory=list)
-    movie_query: list[str] = field(default_factory=list)
     matched_movies: list[str] = field(default_factory=list)
     status: str = "unknown"
     notes: list[str] = field(default_factory=list)
 
 
-def _get_json(path: str, params: dict[str, Any]) -> Any:
-    """GET a cinema-city JSON endpoint, retrying transient failures."""
-    url = f"{SITE}{path}?{urllib.parse.urlencode(params)}"
+@dataclass
+class Report:
+    """Everything one run found, across every cinema."""
+
+    checked_at: str
+    target_date: str
+    target_weekday: str
+    movie_query: list[str]
+    status: str = "unknown"
+    cinemas: list[CinemaResult] = field(default_factory=list)
+
+
+def _get_json(url: str, referer: str) -> Any:
+    """GET a JSON endpoint, retrying transient failures."""
     request = urllib.request.Request(
         url,
         headers={
@@ -126,7 +150,7 @@ def _get_json(path: str, params: dict[str, Any]) -> Any:
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "he-IL,he;q=0.9,en;q=0.8",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": SCHEDULE_URL,
+            "Referer": referer,
         },
     )
 
@@ -140,7 +164,7 @@ def _get_json(path: str, params: dict[str, Any]) -> Any:
             if attempt < 2:
                 time.sleep(2 * (attempt + 1))
 
-    raise RuntimeError(f"Failed to fetch {path}: {last_error}")
+    raise RuntimeError(f"Failed to fetch {url}: {last_error}")
 
 
 def _resolve_target_date(raw: str) -> date:
@@ -171,7 +195,7 @@ def _normalize_title(value: str) -> str:
     """Strip punctuation/spacing so Hebrew and Latin titles compare cleanly."""
     value = value.casefold()
     value = value.replace("־", "-").replace("–", "-").replace("—", "-")
-    value = value.replace(" ", " ")
+    value = value.replace(" ", " ")
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE)
 
 
@@ -185,164 +209,16 @@ def _movie_matches(movie: str, queries: list[str]) -> bool:
     )
 
 
-def _venue_type_id(name: str) -> int | None:
-    """Look up the venue-type id (e.g. VIP) offered by this theater."""
-    venue_types = _get_json(
-        "/tickets/GetVenueTypesByTheater", {"theaterId": THEATER_ID}
-    )
-    for venue_type in venue_types:
-        if _normalize_title(venue_type.get("Name", "")) == _normalize_title(name):
-            return venue_type["VenueTypeId"]
-    return None
-
-
-def _vip_movies(venue_type_id: int) -> list[dict[str, Any]]:
-    """List every movie currently on sale in this theater's VIP halls."""
-    return _get_json(
-        "/tickets/MoviesByTheaterAndVenueType",
-        {"theaterId": THEATER_ID, "venueTypeId": venue_type_id},
-    )
-
-
-def _dates_on_sale(venue_type_id: int, movie_id: int) -> list[str]:
-    """Return the DD/MM/YYYY dates this movie is bookable in VIP."""
-    raw = _get_json(
-        "/tickets/GetDatesByTheaterMovieVenueType",
-        {
-            "theaterId": THEATER_ID,
-            "movieId": movie_id,
-            "venueTypeId": venue_type_id,
-        },
-    )
-
-    dates: list[str] = []
-    for entry in raw:
-        # Entries look like "יום ה 06/08/2026".
-        match = re.search(r"\d{2}/\d{2}/\d{4}", entry or "")
-        if match:
-            dates.append(match.group(0))
-    return dates
-
-
-def _screenings(
-    venue_type_id: int, movie_id: int, target: date
-) -> list[Screening]:
-    """Fetch bookable VIP showtimes for one movie on the target date."""
-    stamp = target.strftime("%d/%m/%Y")
-    events = _get_json(
-        "/tickets/Events",
-        {
-            "TheatreId": TIX_THEATER_ID,
-            "VenueTypeId": venue_type_id,
-            "MovieId": movie_id,
-            "Date": stamp,
-        },
-    )
-
-    screenings: list[Screening] = []
-    for movie in events:
-        title = (movie.get("Name") or "").replace(" ", " ").strip()
-        for slot in movie.get("Dates") or []:
-            # The endpoint has returned neighbouring days before; pin the date.
-            if not (slot.get("Date") or "").startswith(stamp):
-                continue
-            event_id = slot.get("EventId")
-            if not event_id:
-                continue
-            screenings.append(
-                Screening(
-                    movie=title,
-                    date=target.isoformat(),
-                    time=slot.get("Hour") or "Unknown time",
-                    booking_url=(
-                        f"{SITE}/order/?eventID={event_id}"
-                        f"&theaterId={slot.get('TheaterId', TIX_THEATER_ID)}"
-                    ),
-                )
-            )
-
-    screenings.sort(key=lambda item: item.time)
-    return screenings
-
-
-def check(target: date, movie_queries: list[str]) -> CheckResult:
-    """Perform one availability check against Cinema City's official API."""
-    result = CheckResult(
-        checked_at=datetime.now(TZ).isoformat(timespec="seconds"),
-        target_date=target.isoformat(),
-        target_weekday=target.strftime("%A"),
-        source_url=SCHEDULE_URL,
-        theater=THEATER_NAME,
-        venue_type=VENUE_TYPE_NAME,
-        vip_offered=False,
-        movie_in_vip_lineup=False,
-        date_detected=False,
-        movie_query=movie_queries,
-    )
-
-    venue_type_id = _venue_type_id(VENUE_TYPE_NAME)
-    if venue_type_id is None:
-        result.status = "venue_type_not_offered"
-        result.notes.append(
-            f"לא נמצא אולם {VENUE_TYPE_NAME} ב{THEATER_NAME}."
-        )
-        return result
-    result.vip_offered = True
-
-    matched = [
-        movie
-        for movie in _vip_movies(venue_type_id)
-        if _movie_matches(movie.get("Name", ""), movie_queries)
-    ]
-    if not matched:
-        result.status = "movie_not_in_vip_lineup"
-        result.notes.append(
-            f"אף סרט באולמות ה-{VENUE_TYPE_NAME} של {THEATER_NAME} "
-            f"לא תואם לחיפוש: {', '.join(movie_queries)}."
-        )
-        return result
-    result.movie_in_vip_lineup = True
-    result.matched_movies = [movie.get("Name", "?") for movie in matched]
-
-    stamp = target.strftime("%d/%m/%Y")
-    for movie in matched:
-        on_sale = _dates_on_sale(venue_type_id, movie["MovieId"])
-        for value in on_sale:
-            if value not in result.vip_dates_on_sale:
-                result.vip_dates_on_sale.append(value)
-
-        if stamp in on_sale:
-            result.screenings.extend(
-                _screenings(venue_type_id, movie["MovieId"], target)
-            )
-
-    result.date_detected = stamp in result.vip_dates_on_sale
-
-    if result.screenings:
-        result.status = "available"
-    elif result.date_detected:
-        result.status = "date_on_sale_but_no_screenings"
-        result.notes.append(
-            f"התאריך {stamp} מופיע כפתוח למכירה, אך לא התקבלו הקרנות להזמנה."
-        )
-    else:
-        result.status = "target_date_not_on_sale"
-        titles = ", ".join(result.matched_movies)
-        result.notes.append(
-            f"הסרט {titles} מוקרן באולמות ה-{VENUE_TYPE_NAME} של {THEATER_NAME}, "
-            f"אך {_hebrew_date(target)} עדיין לא נפתח למכירה."
-        )
-        if result.vip_dates_on_sale:
-            result.notes.append(
-                "תאריכים שכבר נפתחו: " + ", ".join(result.vip_dates_on_sale)
-            )
-
-    return result
-
-
 def _hebrew_date(value: date) -> str:
     """Render a date the way Israeli sites do: 'יום חמישי 06/08/2026'."""
     return f"{HEBREW_WEEKDAYS[value.weekday()]} {value.strftime('%d/%m/%Y')}"
+
+
+def _short_dates(values: list[str]) -> str:
+    """Render ISO dates compactly for a message: '02/08, 03/08'."""
+    return ", ".join(
+        date.fromisoformat(value).strftime("%d/%m") for value in values
+    )
 
 
 def _next_check(after: datetime) -> datetime:
@@ -364,32 +240,421 @@ def _next_check(after: datetime) -> datetime:
     raise AssertionError("SCHEDULE_HOURS_UTC is empty")
 
 
-def _render_status(result: CheckResult, target: date) -> str:
+# --------------------------------------------------------------------------
+# Cinema City (Glilot)
+# --------------------------------------------------------------------------
+
+CC_SITE = "https://www.cinema-city.co.il"
+# Glilot: `id` is the site theater id, `theathereid` is the ticketing system id.
+CC_THEATER_ID = int(os.getenv("THEATER_ID", "1"))
+CC_TIX_THEATER_ID = int(os.getenv("TIX_THEATER_ID", "1170"))
+CC_THEATER_NAME = os.getenv("THEATER_NAME", "סינמה סיטי גלילות")
+CC_SCHEDULE_URL = (
+    f"{CC_SITE}/Timehour?id={CC_THEATER_ID}&theathereid={CC_TIX_THEATER_ID}&vid=2"
+)
+
+
+def _cc_json(path: str, params: dict[str, Any]) -> Any:
+    """GET a cinema-city JSON endpoint."""
+    url = f"{CC_SITE}{path}?{urllib.parse.urlencode(params)}"
+    return _get_json(url, referer=CC_SCHEDULE_URL)
+
+
+def _cc_venue_type_id(name: str) -> int | None:
+    """Look up the venue-type id (e.g. VIP) offered by this theater."""
+    venue_types = _cc_json(
+        "/tickets/GetVenueTypesByTheater", {"theaterId": CC_THEATER_ID}
+    )
+    for venue_type in venue_types:
+        if _normalize_title(venue_type.get("Name", "")) == _normalize_title(name):
+            return venue_type["VenueTypeId"]
+    return None
+
+
+def _cc_dates_on_sale(venue_type_id: int, movie_id: int) -> list[str]:
+    """Return the ISO dates this movie is bookable in VIP."""
+    raw = _cc_json(
+        "/tickets/GetDatesByTheaterMovieVenueType",
+        {
+            "theaterId": CC_THEATER_ID,
+            "movieId": movie_id,
+            "venueTypeId": venue_type_id,
+        },
+    )
+
+    dates: list[str] = []
+    for entry in raw:
+        # Entries look like "יום ה 06/08/2026".
+        match = re.search(r"(\d{2})/(\d{2})/(\d{4})", entry or "")
+        if match:
+            day, month, year = match.groups()
+            dates.append(f"{year}-{month}-{day}")
+    return dates
+
+
+def _cc_screenings(
+    venue_type_id: int, movie_id: int, target: date
+) -> list[Screening]:
+    """Fetch every bookable VIP showtime for one movie on the target date."""
+    stamp = target.strftime("%d/%m/%Y")
+    events = _cc_json(
+        "/tickets/Events",
+        {
+            "TheatreId": CC_TIX_THEATER_ID,
+            "VenueTypeId": venue_type_id,
+            "MovieId": movie_id,
+            "Date": stamp,
+        },
+    )
+
+    screenings: list[Screening] = []
+    for movie in events:
+        title = (movie.get("Name") or "").replace(" ", " ").strip()
+        for slot in movie.get("Dates") or []:
+            # The endpoint has returned neighbouring days before; pin the date.
+            if not (slot.get("Date") or "").startswith(stamp):
+                continue
+            event_id = slot.get("EventId")
+            if not event_id:
+                continue
+            screenings.append(
+                Screening(
+                    movie=title,
+                    date=target.isoformat(),
+                    time=slot.get("Hour") or "Unknown time",
+                    booking_url=(
+                        f"{CC_SITE}/order/?eventID={event_id}"
+                        f"&theaterId={slot.get('TheaterId', CC_TIX_THEATER_ID)}"
+                    ),
+                )
+            )
+
+    return screenings
+
+
+def check_cinema_city(target: date, movie_queries: list[str]) -> CinemaResult:
+    """Check Cinema City Glilot's VIP halls for the target date."""
+    result = CinemaResult(
+        slug="cinema-city-glilot",
+        theater=CC_THEATER_NAME,
+        venue_type=VENUE_TYPE_NAME,
+        source_url=CC_SCHEDULE_URL,
+    )
+
+    venue_type_id = _cc_venue_type_id(VENUE_TYPE_NAME)
+    if venue_type_id is None:
+        result.status = "venue_type_not_offered"
+        result.notes.append(f"לא נמצא אולם {VENUE_TYPE_NAME} ב{CC_THEATER_NAME}.")
+        return result
+    result.vip_offered = True
+
+    matched = [
+        movie
+        for movie in _cc_json(
+            "/tickets/MoviesByTheaterAndVenueType",
+            {"theaterId": CC_THEATER_ID, "venueTypeId": venue_type_id},
+        )
+        if _movie_matches(movie.get("Name", ""), movie_queries)
+    ]
+    if not matched:
+        result.status = "movie_not_in_vip_lineup"
+        result.notes.append(
+            f"אף סרט באולמות ה-{VENUE_TYPE_NAME} של {CC_THEATER_NAME} "
+            f"לא תואם לחיפוש: {', '.join(movie_queries)}."
+        )
+        return result
+    result.movie_in_vip_lineup = True
+    result.matched_movies = [movie.get("Name", "?") for movie in matched]
+
+    stamp = target.isoformat()
+    for movie in matched:
+        for value in _cc_dates_on_sale(venue_type_id, movie["MovieId"]):
+            if value not in result.vip_dates_on_sale:
+                result.vip_dates_on_sale.append(value)
+
+        if stamp in result.vip_dates_on_sale:
+            result.screenings.extend(
+                _cc_screenings(venue_type_id, movie["MovieId"], target)
+            )
+
+    result.vip_dates_on_sale.sort()
+    result.date_detected = stamp in result.vip_dates_on_sale
+    _finish(result, target, movie_queries)
+    return result
+
+
+# --------------------------------------------------------------------------
+# Yes Planet / Planet Cinema (Rishon LeZion)
+# --------------------------------------------------------------------------
+
+PLANET_SITE = "https://www.planetcinema.co.il"
+# 10100 is the chain's tenant id in the shared "quickbook" data service.
+PLANET_API = f"{PLANET_SITE}/il/data-api-service/v1/quickbook/10100"
+PLANET_TICKETS = "https://tickets5.planetcinema.co.il"
+PLANET_CINEMA_ID = os.getenv("PLANET_CINEMA_ID", "1072")
+PLANET_THEATER_NAME = os.getenv("PLANET_THEATER_NAME", "פלאנט ראשון לציון")
+# The chain's own attribute vocabulary. Matched exactly, never as a substring:
+# "vip-light" is a different (cheaper) product at other branches entirely.
+PLANET_VIP_ATTR = "vip"
+
+
+def _planet_json(path: str) -> Any:
+    """GET a Planet quickbook endpoint, already scoped to VIP and Hebrew."""
+    url = f"{PLANET_API}{path}?attr={PLANET_VIP_ATTR}&lang=he_IL"
+    return _get_json(url, referer=f"{PLANET_SITE}/")
+
+
+def _planet_horizon(today: date) -> str:
+    return (today + timedelta(days=HORIZON_DAYS)).isoformat()
+
+
+def _planet_vip_dates(today: date) -> list[str]:
+    """ISO dates with any VIP screening on sale at this cinema."""
+    payload = _planet_json(
+        f"/dates/in-cinema/{PLANET_CINEMA_ID}/until/{_planet_horizon(today)}"
+    )
+    return list((payload.get("body") or {}).get("dates") or [])
+
+
+def _planet_screenings(target: date, movie_queries: list[str]) -> tuple[
+    list[Screening], list[str]
+]:
+    """VIP showtimes of the wanted movie on one date, plus the titles matched.
+
+    The events list covers every film screening that day, so it has to be
+    joined back to the matching films by id rather than taken wholesale.
+    """
+    payload = _planet_json(
+        f"/film-events/in-cinema/{PLANET_CINEMA_ID}/at-date/{target.isoformat()}"
+    )
+    body = payload.get("body") or {}
+
+    wanted = {
+        film["id"]: (film.get("name") or "?").strip()
+        for film in body.get("films") or []
+        if film.get("id") and _movie_matches(film.get("name") or "", movie_queries)
+    }
+    if not wanted:
+        return [], []
+
+    screenings = []
+    for event in body.get("events") or []:
+        if event.get("filmId") not in wanted:
+            continue
+        if PLANET_VIP_ATTR not in (event.get("attributeIds") or []):
+            continue
+        event_id = event.get("id")
+        if not event_id:
+            continue
+        stamp = event.get("eventDateTime") or ""
+        screenings.append(
+            Screening(
+                movie=wanted[event["filmId"]],
+                date=target.isoformat(),
+                time=stamp[11:16] or "Unknown time",
+                # The API's own bookingLink points at /api/order/... which 404s.
+                booking_url=f"{PLANET_TICKETS}/order/{event_id}?lang=he",
+                hall=(event.get("auditorium") or "").strip(),
+            )
+        )
+    return screenings, sorted(set(wanted.values()))
+
+
+def check_planet(target: date, movie_queries: list[str]) -> CinemaResult:
+    """Check Yes Planet Rishon LeZion's VIP halls for the target date."""
+    result = CinemaResult(
+        slug="planet-rishon",
+        theater=PLANET_THEATER_NAME,
+        venue_type=VENUE_TYPE_NAME,
+        source_url=f"{PLANET_SITE}/il/cinemas/{PLANET_CINEMA_ID}",
+    )
+
+    today = datetime.now(TZ).date()
+    result.vip_dates_on_sale = sorted(_planet_vip_dates(today))
+    if not result.vip_dates_on_sale:
+        result.status = "venue_type_not_offered"
+        result.notes.append(
+            f"לא נמצאו הקרנות {VENUE_TYPE_NAME} ב{PLANET_THEATER_NAME}."
+        )
+        return result
+    result.vip_offered = True
+    result.date_detected = target.isoformat() in result.vip_dates_on_sale
+
+    if result.date_detected:
+        result.screenings, result.matched_movies = _planet_screenings(
+            target, movie_queries
+        )
+        result.movie_in_vip_lineup = bool(result.matched_movies)
+    else:
+        # The date is not open yet, so the target tells us nothing about
+        # whether the movie plays VIP here at all. Ask the furthest date that
+        # *is* open -- one extra call, and it turns "not on sale" into the far
+        # more useful "it plays here, the date just has not been released".
+        _, titles = _planet_screenings(
+            date.fromisoformat(result.vip_dates_on_sale[-1]), movie_queries
+        )
+        result.matched_movies = titles
+        result.movie_in_vip_lineup = bool(titles)
+
+    _finish(result, target, movie_queries)
+    return result
+
+
+# --------------------------------------------------------------------------
+# Shared status + rendering
+# --------------------------------------------------------------------------
+
+
+def _finish(result: CinemaResult, target: date, movie_queries: list[str]) -> None:
+    """Derive the final status and the human-readable notes for one cinema."""
+    result.screenings.sort(key=lambda item: item.time)
+
+    if result.screenings:
+        result.status = "available"
+        return
+
+    if not result.movie_in_vip_lineup:
+        result.status = "movie_not_in_vip_lineup"
+        result.notes.append(
+            f"אף סרט באולמות ה-{result.venue_type} של {result.theater} "
+            f"לא תואם לחיפוש: {', '.join(movie_queries)}."
+        )
+    elif result.date_detected:
+        result.status = "date_on_sale_but_no_screenings"
+        result.notes.append(
+            f"{_hebrew_date(target)} פתוח למכירה ב{result.theater}, "
+            f"אך אין הקרנות {result.venue_type} של הסרט."
+        )
+    else:
+        result.status = "target_date_not_on_sale"
+        result.notes.append(
+            f"{', '.join(result.matched_movies)} מוקרן באולמות ה-"
+            f"{result.venue_type} של {result.theater}, אך "
+            f"{_hebrew_date(target)} עדיין לא נפתח למכירה."
+        )
+
+    if result.vip_dates_on_sale:
+        result.notes.append(
+            "תאריכים שכבר נפתחו: " + _short_dates(result.vip_dates_on_sale)
+        )
+
+
+def _screening_label(screening: Screening) -> str:
+    """'21:30 · VIP 23' when the hall is known, otherwise just the time."""
+    return f"{screening.time} · {screening.hall}" if screening.hall else screening.time
+
+
+def _render_markdown(report: Report, target: date) -> str:
+    """Render the Hebrew summary written to artifacts/result.md."""
+    lines = [
+        f"# אולמות {VENUE_TYPE_NAME} — {_hebrew_date(target)}",
+        "",
+        f"**סטטוס כללי:** {HEBREW_STATUS.get(report.status, report.status)}",
+        f"**נבדק:** {report.checked_at}",
+        "",
+    ]
+
+    for cinema in report.cinemas:
+        lines.extend(
+            [
+                f"## {cinema.theater}",
+                "",
+                f"**סטטוס:** {HEBREW_STATUS.get(cinema.status, cinema.status)}",
+                f"[לוח ההקרנות הרשמי]({cinema.source_url})",
+                "",
+            ]
+        )
+        if cinema.screenings:
+            lines.append("### הקרנות זמינות")
+            for screening in cinema.screenings:
+                lines.append(
+                    f"- **{_screening_label(screening)}** — {screening.movie} — "
+                    f"[להזמנת כרטיסים]({screening.booking_url})"
+                )
+            lines.append("")
+        if cinema.vip_dates_on_sale:
+            lines.extend(
+                [
+                    "### תאריכים שכבר נפתחו למכירה",
+                    _short_dates(cinema.vip_dates_on_sale),
+                    "",
+                ]
+            )
+        if cinema.notes:
+            lines.extend([f"- {note}" for note in cinema.notes] + [""])
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_alert(cinema: CinemaResult, target: date) -> str:
+    """Render the Telegram body for one cinema that has just opened.
+
+    Times link straight to the booking page, so the long order URLs never
+    appear as text -- which also avoids bidi mangling in a Hebrew message.
+    """
+    escape = html.escape
+
+    by_movie: dict[str, list[Screening]] = {}
+    for screening in cinema.screenings:
+        by_movie.setdefault(screening.movie, []).append(screening)
+
+    lines = [
+        f"🎬 <b>נפתחו כרטיסי {escape(cinema.venue_type)}</b>",
+        f"{escape(cinema.theater)} · {escape(_hebrew_date(target))}",
+    ]
+    for movie, showings in by_movie.items():
+        lines.append("")
+        lines.append(f"<b>{escape(movie)}</b>")
+        for screening in showings:
+            lines.append(
+                f'🎟 <a href="{escape(screening.booking_url)}">'
+                f"{escape(_screening_label(screening))}</a>"
+            )
+
+    lines.append("")
+    lines.append("<i>לחצו על השעה להזמנת כרטיסים</i>")
+    return "\n".join(lines)
+
+
+def _render_status(report: Report, target: date) -> str:
     """Render the pinned Telegram status panel, in Telegram's HTML mode.
 
     This one message is edited in place after every run, so it has to read
-    standalone: what is being watched, what the answer is right now, and when
-    the question was last asked. Times are absolute -- a relative "12 minutes
-    ago" would freeze into the message and start lying immediately.
+    standalone: what is being watched, where each cinema stands right now, and
+    when the question was last asked. Times are absolute -- a relative "12
+    minutes ago" would freeze into the message and start lying immediately.
     """
     escape = html.escape
-    checked = datetime.fromisoformat(result.checked_at)
-    watching = result.matched_movies or result.movie_query
+    checked = datetime.fromisoformat(report.checked_at)
+
+    watching = []
+    for cinema in report.cinemas:
+        for title in cinema.matched_movies:
+            if title not in watching:
+                watching.append(title)
 
     lines = [
-        f"📡 <b>ניטור {escape(result.venue_type)}</b> · {escape(result.theater)}",
-        f"🎬 {escape(', '.join(watching)) if watching else '—'}",
+        f"📡 <b>ניטור {escape(VENUE_TYPE_NAME)}</b>",
+        f"🎬 {escape(', '.join(watching or report.movie_query))}",
         f"📅 יעד: {escape(_hebrew_date(target))}",
-        "",
-        f"{STATUS_EMOJI.get(result.status, '⚪️')} <b>"
-        f"{escape(HEBREW_STATUS.get(result.status, result.status))}</b>",
     ]
 
-    for screening in result.screenings:
+    for cinema in report.cinemas:
+        lines.append("")
         lines.append(
-            f'🎟 <a href="{escape(screening.booking_url)}">'
-            f"{escape(screening.time)}</a>"
+            f"{STATUS_EMOJI.get(cinema.status, '⚪️')} "
+            f"<b>{escape(cinema.theater)}</b>"
         )
+        lines.append(escape(HEBREW_STATUS.get(cinema.status, cinema.status)))
+        for screening in cinema.screenings:
+            lines.append(
+                f'🎟 <a href="{escape(screening.booking_url)}">'
+                f"{escape(_screening_label(screening))}</a>"
+            )
+        if cinema.vip_dates_on_sale and cinema.status != "available":
+            lines.append(
+                "📆 נפתחו: " + escape(_short_dates(cinema.vip_dates_on_sale))
+            )
 
     lines.extend(
         [
@@ -399,92 +664,68 @@ def _render_status(result: CheckResult, target: date) -> str:
             f"{escape(_next_check(checked).strftime('%d/%m %H:%M'))}",
         ]
     )
-    if result.vip_dates_on_sale:
-        lines.append(
-            "📆 תאריכים שנפתחו: " + escape(", ".join(result.vip_dates_on_sale))
-        )
-
     return "\n".join(lines)
 
 
-def _render_markdown(result: CheckResult, target: date) -> str:
-    """Render the Hebrew summary written to artifacts/result.md."""
-    status_he = HEBREW_STATUS.get(result.status, result.status)
-    lines = [
-        f"# {result.theater} — אולמות {result.venue_type}",
-        "",
-        f"**תאריך מבוקש:** {_hebrew_date(target)}",
-        f"**סטטוס:** {status_he}",
-        f"**נבדק:** {result.checked_at}",
-        f"[לוח ההקרנות הרשמי]({result.source_url})",
-        "",
-    ]
+def _write_alerts(report: Report, target: date) -> list[dict[str, str]]:
+    """Write one Telegram body per cinema that is newly bookable.
 
-    if result.screenings:
-        lines.append("## הקרנות זמינות")
-        for screening in result.screenings:
-            lines.append(
-                f"- **{screening.time}** — {screening.movie} — "
-                f"[להזמנת כרטיסים]({screening.booking_url})"
-            )
-        lines.append("")
-
-    if result.vip_dates_on_sale:
-        lines.extend(
-            [
-                f"## תאריכים שכבר נפתחו למכירה ב-{result.venue_type}",
-                ", ".join(result.vip_dates_on_sale),
-                "",
-            ]
-        )
-
-    if result.notes:
-        lines.extend(["## פרטים נוספים", *[f"- {note}" for note in result.notes]])
-
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _render_notification(result: CheckResult, target: date) -> str:
-    """Render the Hebrew Telegram body, using Telegram's HTML parse mode.
-
-    Times link straight to the booking page, so the long order URLs never
-    appear as text -- which also avoids bidi mangling in a Hebrew message.
+    The workflow announces each cinema separately, so Glilot opening first
+    can never suppress the alert for Rishon opening later.
     """
-    escape = html.escape
-    status_he = HEBREW_STATUS.get(result.status, result.status)
-
-    if result.status != "available":
-        return (
-            f"<b>{escape(result.theater)}</b> · אולמות {escape(result.venue_type)}\n"
-            f"{escape(_hebrew_date(target))}\n"
-            f"{escape(status_he)}"
+    alerts = []
+    for cinema in report.cinemas:
+        if cinema.status != "available":
+            continue
+        telegram_file = OUTPUT_DIR / f"alert-{cinema.slug}.txt"
+        telegram_file.write_text(_render_alert(cinema, target), encoding="utf-8")
+        alerts.append(
+            {
+                "slug": cinema.slug,
+                "theater": cinema.theater,
+                "date": target.isoformat(),
+                "title": (
+                    f"🎬 נפתחו כרטיסי {cinema.venue_type} ב{cinema.theater}"
+                    f" — {target.isoformat()}"
+                ),
+                "telegram_file": str(telegram_file),
+            }
         )
+    return alerts
 
-    # Group by movie so the title is stated once instead of on every row.
-    by_movie: dict[str, list[Screening]] = {}
-    for screening in result.screenings:
-        by_movie.setdefault(screening.movie, []).append(screening)
 
-    lines = [
-        f"🎬 <b>נפתחו כרטיסי {escape(result.venue_type)}</b>",
-        f"{escape(result.theater)} · {escape(_hebrew_date(target))}",
-    ]
-    for movie, showings in by_movie.items():
-        lines.append("")
-        lines.append(f"<b>{escape(movie)}</b>")
-        for screening in showings:
-            lines.append(
-                f'🎟 <a href="{escape(screening.booking_url)}">'
-                f"{escape(screening.time)}</a>"
+def _guard(check, slug: str, theater: str):
+    """Run one cinema's check, turning its outage into a reported status.
+
+    Two chains means two ways to break, and a Planet outage must not take
+    Cinema City's alerts down with it -- before this, one raise ended the run
+    and nothing got announced or refreshed.
+    """
+
+    def run(target: date, movie_queries: list[str]) -> CinemaResult:
+        try:
+            return check(target, movie_queries)
+        except (RuntimeError, KeyError, TypeError, ValueError) as error:
+            return CinemaResult(
+                slug=slug,
+                theater=theater,
+                venue_type=VENUE_TYPE_NAME,
+                source_url="",
+                status="check_failed",
+                notes=[f"{theater}: {error}"],
             )
 
-    lines.append("")
-    lines.append("<i>לחצו על השעה להזמנת כרטיסים</i>")
-    return "\n".join(lines)
+    return run
+
+
+CHECKS = (
+    _guard(check_cinema_city, "cinema-city-glilot", CC_THEATER_NAME),
+    _guard(check_planet, "planet-rishon", PLANET_THEATER_NAME),
+)
 
 
 def main() -> int:
-    """Run the monitor and write JSON/Markdown outputs for GitHub Actions."""
+    """Run every cinema check and write the artifacts GitHub Actions reads."""
     target = _resolve_target_date(os.getenv("TARGET_DATE", "thursday"))
     movie_queries = [
         value.strip()
@@ -494,21 +735,43 @@ def main() -> int:
         if value.strip()
     ]
 
-    result = check(target, movie_queries)
+    report = Report(
+        checked_at=datetime.now(TZ).isoformat(timespec="seconds"),
+        target_date=target.isoformat(),
+        target_weekday=target.strftime("%A"),
+        movie_query=movie_queries,
+        cinemas=[check(target, movie_queries) for check in CHECKS],
+    )
+    # If every cinema failed, the monitor really is blind and the workflow
+    # should fail loudly. One failing while another answers is survivable, and
+    # the panel shows it, so the working chain keeps alerting.
+    if all(cinema.status == "check_failed" for cinema in report.cinemas):
+        raise RuntimeError(
+            "Every cinema check failed: "
+            + " | ".join(note for c in report.cinemas for note in c.notes)
+        )
 
-    payload: dict[str, Any] = asdict(result)
+    report.status = min(
+        (cinema.status for cinema in report.cinemas),
+        key=lambda status: STATUS_PRIORITY.index(status)
+        if status in STATUS_PRIORITY
+        else len(STATUS_PRIORITY),
+    )
+
     OUTPUT_DIR.mkdir(exist_ok=True)
+    payload: dict[str, Any] = asdict(report)
     (OUTPUT_DIR / "result.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     (OUTPUT_DIR / "result.md").write_text(
-        _render_markdown(result, target), encoding="utf-8"
-    )
-    (OUTPUT_DIR / "notify.txt").write_text(
-        _render_notification(result, target), encoding="utf-8"
+        _render_markdown(report, target), encoding="utf-8"
     )
     (OUTPUT_DIR / "status.txt").write_text(
-        _render_status(result, target), encoding="utf-8"
+        _render_status(report, target), encoding="utf-8"
+    )
+    (OUTPUT_DIR / "alerts.json").write_text(
+        json.dumps(_write_alerts(report, target), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
     print(json.dumps(payload, ensure_ascii=False, indent=2))

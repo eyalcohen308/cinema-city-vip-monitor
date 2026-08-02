@@ -69,40 +69,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          status=$(jq -r .status artifacts/result.json)
-          resolved_date=$(jq -r .target_date artifacts/result.json)
-          title="🎬 נפתחו כרטיסי VIP בסינמה סיטי גלילות — ${resolved_date}"
-
-          if [[ "$status" != "available" ]]; then
-            echo "Status is '$status' for ${resolved_date} — nothing to announce."
+          if [[ "$(jq 'length' artifacts/alerts.json)" == "0" ]]; then
+            echo "Nothing newly bookable — nothing to announce."
             exit 0
           fi
 
-          # The issue doubles as the "already told you" marker, so Telegram
-          # fires exactly once per date instead of every hour after opening.
-          # Match locally on the ISO date rather than via `--search`: GitHub's
-          # search tokenizer is unreliable for Hebrew titles, and a missed
-          # match here would mean a duplicate issue and an hourly Telegram.
-          existing=$(gh issue list --state all --limit 200 --json title \
-            --jq "[.[] | select(.title | contains(\"${resolved_date}\"))] | length")
-          if [[ "$existing" != "0" ]]; then
-            echo "Already announced ${resolved_date}."
-            exit 0
-          fi
+          # Announce each cinema separately. Glilot opening a date must never
+          # suppress the alert for Rishon opening the same date later, so the
+          # "already told you" marker is per cinema *and* date, not per date.
+          #
+          # The issue is that marker. Match locally on theater + ISO date
+          # rather than via `--search`: GitHub's search tokenizer is unreliable
+          # for Hebrew titles, and a missed match would mean a duplicate issue
+          # and a Telegram message on every run thereafter.
+          titles=$(gh issue list --state all --limit 200 --json title --jq '.[].title')
 
-          gh issue create --title "$title" --body-file artifacts/result.md
+          jq -c '.[]' artifacts/alerts.json | while read -r alert; do
+            theater=$(jq -r .theater <<<"$alert")
+            resolved_date=$(jq -r .date <<<"$alert")
+            title=$(jq -r .title <<<"$alert")
+            body=$(jq -r .telegram_file <<<"$alert")
 
-          if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
-            echo "Telegram secrets not set — GitHub issue only."
-            exit 0
-          fi
-          curl -sS --fail-with-body -X POST \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text@artifacts/notify.txt" \
-            --data "parse_mode=HTML" \
-            --data "disable_web_page_preview=true" > /dev/null
-          echo "Telegram message sent."
+            if printf '%s\n' "$titles" | grep -F "$resolved_date" | grep -qF "$theater"; then
+              echo "Already announced ${theater} for ${resolved_date}."
+              continue
+            fi
+
+            gh issue create --title "$title" --body-file artifacts/result.md
+
+            if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+              echo "Telegram secrets not set — GitHub issue only."
+              continue
+            fi
+            curl -sS --fail-with-body -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+              --data-urlencode "text@${body}" \
+              --data "parse_mode=HTML" \
+              --data "disable_web_page_preview=true" > /dev/null
+            echo "Telegram alert sent for ${theater}."
+          done
 
       - name: Refresh the pinned status message
         if: success()
